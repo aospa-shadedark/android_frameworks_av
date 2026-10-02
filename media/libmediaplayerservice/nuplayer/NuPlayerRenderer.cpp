@@ -1556,8 +1556,14 @@ void NuPlayer::Renderer::postDrainVideoQueue() {
     // drain rather than waiting for the next tick and missing the 40ms
     // deadline. Frames still in the future hit the VSync boundary check in
     // onDrainVideoQueue, so on-time alignment is unaffected.
-    if (mVsyncVideoModeEnabled && mHasVideo && mAnchorTimeMediaUs >= 0) {
-        if (getRealTimeUs(mediaTimeUs, nowUs) <= nowUs) {
+    int64_t clockRealTimeUs = -1;
+    // With a usable MediaClock, drain due frames immediately;
+    // future frames remain VSync-aligned.
+    // Require an actual anchor—mAnchorTimeMediaUs alone is insufficient—or normal
+    // scheduling prevents decode-speed playback.
+    if (mVsyncVideoModeEnabled && mHasVideo && mAnchorTimeMediaUs >= 0
+        && mMediaClock->getRealTimeFor(mediaTimeUs, &clockRealTimeUs) == OK) {
+        if (clockRealTimeUs <= nowUs) {
             msg->post();
             mDrainVideoQueuePending = true;
         }
@@ -1636,16 +1642,25 @@ void NuPlayer::Renderer::onDrainVideoQueue() {
     int64_t nowUs = ALooper::GetNowUs();
     int64_t realTimeUs;
     int64_t mediaTimeUs = -1;
+    // Whether realTimeUs below is a real clock conversion of the frame's PTS or
+    // just the "no anchor yet, render immediately" placeholder.
+    bool clockAnchored = true;
+
     if (mFlags & FLAG_REAL_TIME) {
         CHECK(entry->mBuffer->meta()->findInt64("timeUs", &realTimeUs));
     } else {
         CHECK(entry->mBuffer->meta()->findInt64("timeUs", &mediaTimeUs));
 
-        realTimeUs = getRealTimeUs(mediaTimeUs, nowUs);
+        // Equivalent to getRealTimeUs(mediaTimeUs, nowUs), but also tells us
+        // whether the media clock was actually anchored.
+        clockAnchored = (mMediaClock->getRealTimeFor(mediaTimeUs, &realTimeUs) == OK);
+        if (!clockAnchored) {
+            realTimeUs = nowUs;
+        }
     }
     realTimeUs = mVideoScheduler->schedule(realTimeUs * 1000) / 1000;
     // If the frame targets a future VSync boundary, wait for the next VSync.
-    if (mVsyncVideoModeEnabled && mHasVsyncTiming
+    if (mVsyncVideoModeEnabled && mHasVsyncTiming && clockAnchored
             && realTimeUs > (mLastVsyncExpectedPresentTimeNs / 1000)) {
         mDrainVideoQueuePending = false;
         return;
@@ -2619,6 +2634,14 @@ void NuPlayer::Renderer::onVsyncEvent(const sp<AMessage> &msg) {
     if (msg->findInt64("expectedPresentTimeNs", &expectedPresentTimeNs) &&
         msg->findInt64("vsyncPeriodNs", &vsyncPeriodNs)) {
 
+        // Store the boundary BEFORE any early-return below.  mHasVsyncTiming stays
+        // true once set, so returning early (empty queue / paused) used to leave the
+        // future-frame guard in onDrainVideoQueue() armed with an expired boundary
+        // (observed 51.3ms stale while the decoder refilled the queue).  The old
+        // ALOGV here was also misleading: it printed a value that was never stored.
+        mLastVsyncExpectedPresentTimeNs = expectedPresentTimeNs;
+        mLastVsyncPeriodNs = vsyncPeriodNs;
+        mHasVsyncTiming = true;
         ALOGV("Stored vsync timing: expectedPresent=%" PRId64 " period=%" PRId64,
               expectedPresentTimeNs, vsyncPeriodNs);
     } else {
@@ -2636,14 +2659,6 @@ void NuPlayer::Renderer::onVsyncEvent(const sp<AMessage> &msg) {
         ALOGV("VSync event skipped: paused=%d syncQueues=%d", mPaused, getSyncQueues());
         return;
     }
-
-    // Always advance to the latest boundary, even with a drain pending: the
-    // looper orders messages by timestamp, so a tick posted before a pending
-    // drain can run after it. Updating unconditionally keeps the boundary
-    // current for whichever drain runs next.
-    mLastVsyncExpectedPresentTimeNs = expectedPresentTimeNs;
-    mLastVsyncPeriodNs = vsyncPeriodNs;
-    mHasVsyncTiming = true;
 
     if (mDrainVideoQueuePending) {
         ALOGV("VSync event: drain already in flight, skipping");

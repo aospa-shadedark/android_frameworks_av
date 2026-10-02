@@ -198,6 +198,8 @@ status_t DeviceHalAidl::initCheck() {
         auto status = parseAndGetVendorParameters(parameterKeys, &values);
         mHasClipTransitionSupport = status == OK && !values.empty();
     }
+    AUGMENT_LOG(I, "AIDL interface version: %d, hasClipTransitionSupport: %d",
+            aidlVersion, mHasClipTransitionSupport);
     std::lock_guard l(mLock);
     return mMapper.initialize();
 }

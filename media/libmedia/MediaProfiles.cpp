@@ -1216,6 +1216,10 @@ MediaProfiles::getInstance()
                         }
 // QTI_END: 2020-04-02: Video: media: add support to pick target specific xml
 // QTI_BEGIN: 2018-08-13: Video: media: Add changes to pick target specific media xml's
+                    } else if (!strcmp(platform, "art")) {
+                        strlcpy(value, "/vendor/etc/media_profiles_art_v2.xml",
+                                PROPERTY_VALUE_MAX);
+                        ALOGI("Default Profiles xml path: %s", value);
                     }
 // QTI_END: 2018-08-13: Video: media: Add changes to pick target specific media xml's
 // QTI_BEGIN: 2020-08-04: Video: media: add support to pick profiles xml based on target variant
